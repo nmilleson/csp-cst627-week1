@@ -1886,3 +1886,304 @@ Overall: PASS
 Saved gradcheck_results.csv
 Read C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\gradcheck_results.csv
 Done — gradcheck.py now writes results to gradcheck_results.csv (one row per parameter tensor: analytic_vs_autograd_max_abs, fd_vs_autograd_max_rel_error, fd_vs_autograd_mean_rel_error, status), matching the same reporting shown in the terminal output earlier.
+
+One more thing I want to show in the grokking experiment at the end is how the weights are evolving during the lag time between training accuracy reaching 100% and the test accuracy reaching it's maximum
+Read C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.py
+Edit C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.py
+Added 7 lines
+Edit C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.py
+Added 28 lines
+Edit C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.py
+Added 4 lines
+Now let's smoke-test the updated script quickly before touching the notebook.
+
+Bash Smoke test updated grokking.py with weight-norm tracking
+IN
+cd "/c/Users/NickMilleson/Documents/CSP/CST 627/Week 1/csp-cst627-week1" && python -c "
+import grokking
+grokking.MAX_EPOCHS = 500
+grokking.GROK_THRESHOLD = 2.0
+grokking.run_grokking(out_csv='/tmp/_smoke.csv', out_png='/tmp/_smoke.png')
+print('OK')
+"
+
+OUT
+device=cpu
+p=97, train_size=4704, test_size=4705
+epoch=      1 loss=4.57618 train_acc=0.0098 test_acc=0.0106 weight_norm=8.657
+epoch=     50 loss=4.49302 train_acc=0.0425 test_acc=0.0002 weight_norm=12.984
+epoch=    100 loss=4.29308 train_acc=0.0867 test_acc=0.0000 weight_norm=22.100
+epoch=    150 loss=3.99508 train_acc=0.1180 test_acc=0.0000 weight_norm=32.118
+epoch=    200 loss=3.66910 train_acc=0.1807 test_acc=0.0000 weight_norm=41.375
+epoch=    250 loss=3.33895 train_acc=0.2664 test_acc=0.0000 weight_norm=49.685
+epoch=    300 loss=3.01144 train_acc=0.3744 test_acc=0.0000 weight_norm=57.144
+epoch=    350 loss=2.68799 train_acc=0.4813 test_acc=0.0000 weight_norm=63.863
+epoch=    400 loss=2.37012 train_acc=0.5912 test_acc=0.0000 weight_norm=69.933
+epoch=    450 loss=2.05989 train_acc=0.6832 test_acc=0.0000 weight_norm=75.424
+epoch=    500 loss=1.76267 train_acc=0.7783 test_acc=0.0000 weight_norm=80.365
+Saved /tmp/_smoke.csv and /tmp/_smoke.png
+OK
+Bash Clean up smoke-test files
+IN
+rm -f /tmp/_smoke.csv /tmp/_smoke.png
+
+OUT
+(Bash completed with no output)
+Now let's update the notebook to match (same weight-norm tracking and two-panel plot with the lag shaded).
+
+Read C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.ipynb
+Edit C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.ipynb
+Edit failed
+Edit Notebook Cell C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.ipynb:cell-3
+Success
+def make_dataset(p=P, train_frac=TRAIN_FRACTION, seed=DATA_SEED, device="cpu"):
+    g = torch.Generator().manual_seed(seed)
+
+    a_all = torch.arange(p * p) // p
+    b_all = torch.arange(p * p) % p
+    labels_all = (a_all + b_all) % p
+
+    def onehot_pairs(a, b, p):
+        n = a.shape[0]
+        X = torch.zeros(n, 2 * p)
+        X[torch.arange(n), a] = 1.0
+        X[torch.arange(n), p + b] = 1.0
+        return X
+
+    train_size = round(train_frac * p * p)
+    perm = torch.randperm(p * p, generator=g)
+    train_idx, test_idx = perm[:train_size], perm[train_size:]
+
+    X_all = onehot_pairs(a_all, b_all, p)
+    X_train, y_train = X_all[train_idx].to(device), labels_all[train_idx].to(device)
+    X_test, y_test = X_all[test_idx].to(device), labels_all[test_idx].to(device)
+    return X_train, y_train, X_test, y_test
+
+
+class OneLayerMLP(nn.Module):
+    def __init__(self, in_dim, hidden, out_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def accuracy(logits, y):
+    return (logits.argmax(dim=1) == y).float().mean().item()
+
+
+def weight_norm(model):
+    """L2 norm across every parameter, flattened -- the standard grokking-paper
+    diagnostic for watching weight decay shrink the solution during the lag
+    between memorization and generalization."""
+    return torch.sqrt(sum(p.pow(2).sum() for p in model.parameters())).item()
+Edit Notebook Cell C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.ipynb:cell-4
+Success
+X_train, y_train, X_test, y_test = make_dataset(device=device)
+print(f"p={P}, train_size={X_train.shape[0]}, test_size={X_test.shape[0]}")
+
+torch.manual_seed(SEED)
+model = OneLayerMLP(X_train.shape[1], HIDDEN, P).to(device)
+opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+loss_fn = nn.CrossEntropyLoss()
+
+log = []  # (epoch, train_acc, test_acc, train_loss, weight_norm)
+grok_checks_remaining = None
+
+for epoch in range(1, MAX_EPOCHS + 1):
+    model.train()
+    opt.zero_grad()
+    logits = model(X_train)
+    loss = loss_fn(logits, y_train)
+    loss.backward()
+    opt.step()
+
+    if epoch % LOG_EVERY == 0 or epoch == 1:
+        model.eval()
+        with torch.no_grad():
+            train_acc = accuracy(logits, y_train)
+            test_acc = accuracy(model(X_test), y_test)
+            w_norm = weight_norm(model)
+        log.append((epoch, train_acc, test_acc, loss.item(), w_norm))
+        if epoch % 2000 == 0 or epoch == 1:
+            print(f"epoch={epoch:7d} loss={loss.item():.5f} "
+                  f"train_acc={train_acc:.4f} test_acc={test_acc:.4f} "
+                  f"weight_norm={w_norm:.3f}")
+
+        if test_acc >= GROK_THRESHOLD:
+            if grok_checks_remaining is None:
+                grok_checks_remaining = GROK_PATIENCE_CHECKS
+            grok_checks_remaining -= 1
+            if grok_checks_remaining <= 0:
+                break
+
+print(f"stopped at epoch {epoch}")
+Edit Notebook Cell C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.ipynb:cell-5
+Success
+with open("grokking_results.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["epoch", "train_accuracy", "test_accuracy", "train_loss", "weight_norm"])
+    writer.writerows(log)
+
+epochs, train_accs, test_accs, _, weight_norms = zip(*log)
+
+# lag window: first epoch training memorized the data, to the first epoch
+# test accuracy hit the grokking threshold (its de facto maximum)
+memorize_epoch = next((e for e, a in zip(epochs, train_accs) if a >= 0.999), None)
+grok_epoch = next((e for e, a in zip(epochs, test_accs) if a >= GROK_THRESHOLD), None)
+
+fig, (ax_acc, ax_norm) = plt.subplots(
+    2, 1, figsize=(7, 7), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
+)
+
+ax_acc.plot(epochs, train_accs, color="#0072B2", label="train accuracy")
+ax_acc.plot(epochs, test_accs, color="#E69F00", label="test accuracy")
+ax_acc.set_ylabel("accuracy")
+ax_acc.set_title(f"Grokking: modular addition mod {P}")
+ax_acc.legend(loc="center right")
+
+ax_norm.plot(epochs, weight_norms, color="#555555", label="weight L2 norm")
+ax_norm.set_ylabel("weight norm")
+ax_norm.set_xlabel("epoch (log scale)")
+ax_norm.legend(loc="upper right")
+
+if memorize_epoch is not None and grok_epoch is not None and grok_epoch > memorize_epoch:
+    for ax in (ax_acc, ax_norm):
+        ax.axvspan(memorize_epoch, grok_epoch, color="#555555", alpha=0.08, zorder=0)
+    ax_acc.axvline(memorize_epoch, color="#555555", linestyle="--", linewidth=1)
+    ax_acc.axvline(grok_epoch, color="#555555", linestyle="--", linewidth=1)
+    ax_acc.annotate("lag", xy=((memorize_epoch * grok_epoch) ** 0.5, 0.5),
+                     ha="center", color="#555555")
+
+ax_norm.set_xscale("log")
+fig.tight_layout()
+fig.savefig("grokking_curve.png", dpi=150)
+plt.show()
+Let me run the full grokking experiment now to verify the lag-shading and weight-norm plot actually work end-to-end (this needs enough epochs for real grokking to occur, so I'll run it in the background).
+
+Bash Run full grokking experiment with weight-norm tracking
+IN
+cd "/c/Users/NickMilleson/Documents/CSP/CST 627/Week 1/csp-cst627-week1" && python grokking.py
+
+OUT
+Command running in background with ID: b0bimlgn6. Output is being written to: C:\Users\NICKMI~1\AppData\Local\Temp\claude\c--Users-NickMilleson-Documents-CSP-CST-627-Week-1-csp-cst627-week1\6f188286-7b58-4475-8b08-71b78406c87c\tasks\b0bimlgn6.output. You will be notified when it completes. To check interim output, use Read on that file path.
+Session cwd remains C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1; directory changes made by the backgrounded command do not apply to subsequent commands.
+I've updated both grokking.py and grokking.ipynb to track weight L2 norm alongside accuracy, and to plot it as a second panel with the memorization→generalization lag shaded. Running the full experiment now in the background to confirm it actually produces a real grokking transition with the shaded lag region — I'll report back with the chart once it finishes.
+
+Bash Check tail of grokking run output
+IN
+tail -n 40 "C:\Users\NICKMI~1\AppData\Local\Temp\claude\c--Users-NickMilleson-Documents-CSP-CST-627-Week-1-csp-cst627-week1\6f188286-7b58-4475-8b08-71b78406c87c\tasks\b0bimlgn6.output"
+
+OUT
+epoch=  10950 loss=0.00394 train_acc=1.0000 test_acc=0.9824 weight_norm=107.418
+epoch=  11000 loss=0.00388 train_acc=1.0000 test_acc=0.9830 weight_norm=107.490
+epoch=  11050 loss=0.00381 train_acc=1.0000 test_acc=0.9828 weight_norm=107.560
+epoch=  11100 loss=0.00375 train_acc=1.0000 test_acc=0.9832 weight_norm=107.631
+epoch=  11150 loss=0.00369 train_acc=1.0000 test_acc=0.9826 weight_norm=107.700
+epoch=  11200 loss=0.00363 train_acc=1.0000 test_acc=0.9834 weight_norm=107.773
+epoch=  11250 loss=0.00357 train_acc=1.0000 test_acc=0.9832 weight_norm=107.845
+epoch=  11300 loss=0.00352 train_acc=1.0000 test_acc=0.9834 weight_norm=107.918
+epoch=  11350 loss=0.00346 train_acc=1.0000 test_acc=0.9841 weight_norm=107.991
+epoch=  11400 loss=0.00340 train_acc=1.0000 test_acc=0.9845 weight_norm=108.065
+epoch=  11450 loss=0.00335 train_acc=1.0000 test_acc=0.9860 weight_norm=108.139
+epoch=  11500 loss=0.00329 train_acc=1.0000 test_acc=0.9862 weight_norm=108.213
+epoch=  11550 loss=0.00323 train_acc=1.0000 test_acc=0.9868 weight_norm=108.283
+epoch=  11600 loss=0.00318 train_acc=1.0000 test_acc=0.9870 weight_norm=108.351
+epoch=  11650 loss=0.00312 train_acc=1.0000 test_acc=0.9877 weight_norm=108.418
+epoch=  11700 loss=0.00307 train_acc=1.0000 test_acc=0.9879 weight_norm=108.482
+epoch=  11750 loss=0.00302 train_acc=1.0000 test_acc=0.9889 weight_norm=108.545
+epoch=  11800 loss=0.00297 train_acc=1.0000 test_acc=0.9900 weight_norm=108.604
+epoch=  11850 loss=0.00292 train_acc=1.0000 test_acc=0.9904 weight_norm=108.662
+epoch=  11900 loss=0.00287 train_acc=1.0000 test_acc=0.9909 weight_norm=108.718
+epoch=  11950 loss=0.00282 train_acc=1.0000 test_acc=0.9915 weight_norm=108.773
+epoch=  12000 loss=0.00277 train_acc=1.0000 test_acc=0.9917 weight_norm=108.828
+epoch=  12050 loss=0.00272 train_acc=1.0000 test_acc=0.9921 weight_norm=108.881
+epoch=  12100 loss=0.00267 train_acc=1.0000 test_acc=0.9921 weight_norm=108.931
+epoch=  12150 loss=0.00263 train_acc=1.0000 test_acc=0.9930 weight_norm=108.980
+epoch=  12200 loss=0.00258 train_acc=1.0000 test_acc=0.9930 weight_norm=109.028
+epoch=  12250 loss=0.00254 train_acc=1.0000 test_acc=0.9928 weight_norm=109.075
+epoch=  12300 loss=0.00250 train_acc=1.0000 test_acc=0.9934 weight_norm=109.123
+epoch=  12350 loss=0.00246 train_acc=1.0000 test_acc=0.9938 weight_norm=109.174
+epoch=  12400 loss=0.00242 train_acc=1.0000 test_acc=0.9934 weight_norm=109.226
+epoch=  12450 loss=0.00238 train_acc=1.0000 test_acc=0.9940 weight_norm=109.282
+epoch=  12500 loss=0.00234 train_acc=1.0000 test_acc=0.9940 weight_norm=109.337
+epoch=  12550 loss=0.00231 train_acc=1.0000 test_acc=0.9938 weight_norm=109.394
+epoch=  12600 loss=0.00227 train_acc=1.0000 test_acc=0.9940 weight_norm=109.451
+epoch=  12650 loss=0.00224 train_acc=1.0000 test_acc=0.9936 weight_norm=109.510
+epoch=  12700 loss=0.00220 train_acc=1.0000 test_acc=0.9934 weight_norm=109.569
+epoch=  12750 loss=0.00217 train_acc=1.0000 test_acc=0.9943 weight_norm=109.629
+Saved grokking_results.csv and grokking_curve.png
+
+[exited with code 0]
+Read C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking_curve.png
+The full run completed and produced a real grokking transition — train accuracy hits 100% around epoch ~800, then a long flat lag before test accuracy climbs from ~0 to ~99% by epoch ~12,750, with the lag region correctly shaded gray across both panels.
+
+One thing worth flagging honestly rather than glossing over: the weight-norm panel does not show the classic "norm shrinks under weight decay" story I described from the literature. Instead, the norm keeps growing right through the lag — but its growth rate clearly decelerates and flattens out around the same point where the lag region starts, going from steep near-linear growth to a much shallower slope. So what we're actually seeing is: the weights stop growing quickly and settle into slow, small adjustments while the network's behavior undergoes its big transition — not a decrease, but a stabilization.
+
+Let me fix one cosmetic issue first — the "lag" annotation is overlapping the legend box — then show you the final chart.
+
+Edit C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.py
+Modified
+Edit Notebook Cell C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking.ipynb:cell-5
+Success
+with open("grokking_results.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["epoch", "train_accuracy", "test_accuracy", "train_loss", "weight_norm"])
+    writer.writerows(log)
+
+epochs, train_accs, test_accs, _, weight_norms = zip(*log)
+
+# lag window: first epoch training memorized the data, to the first epoch
+# test accuracy hit the grokking threshold (its de facto maximum)
+memorize_epoch = next((e for e, a in zip(epochs, train_accs) if a >= 0.999), None)
+grok_epoch = next((e for e, a in zip(epochs, test_accs) if a >= GROK_THRESHOLD), None)
+
+fig, (ax_acc, ax_norm) = plt.subplots(
+    2, 1, figsize=(7, 7), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
+)
+
+ax_acc.plot(epochs, train_accs, color="#0072B2", label="train accuracy")
+ax_acc.plot(epochs, test_accs, color="#E69F00", label="test accuracy")
+ax_acc.set_ylabel("accuracy")
+ax_acc.set_title(f"Grokking: modular addition mod {P}")
+ax_acc.legend(loc="upper left")
+
+ax_norm.plot(epochs, weight_norms, color="#555555", label="weight L2 norm")
+ax_norm.set_ylabel("weight norm")
+ax_norm.set_xlabel("epoch (log scale)")
+ax_norm.legend(loc="upper right")
+
+if memorize_epoch is not None and grok_epoch is not None and grok_epoch > memorize_epoch:
+    for ax in (ax_acc, ax_norm):
+        ax.axvspan(memorize_epoch, grok_epoch, color="#555555", alpha=0.08, zorder=0)
+    ax_acc.axvline(memorize_epoch, color="#555555", linestyle="--", linewidth=1)
+    ax_acc.axvline(grok_epoch, color="#555555", linestyle="--", linewidth=1)
+    ax_acc.annotate("lag", xy=((memorize_epoch * grok_epoch) ** 0.5, 0.5),
+                     ha="center", color="#555555")
+
+ax_norm.set_xscale("log")
+fig.tight_layout()
+fig.savefig("grokking_curve.png", dpi=150)
+plt.show()
+Bash Regenerate chart from existing results with fixed legend placement
+IN
+cd "/c/Users/NickMilleson/Documents/CSP/CST 627/Week 1/csp-cst627-week1" && python -c "
+import grokking, csv
+with open('grokking_results.csv') as f:
+    rows = list(csv.DictReader(f))
+log = [(int(r['epoch']), float(r['train_accuracy']), float(r['test_accuracy']), float(r['train_loss']), float(r['weight_norm'])) for r in rows]
+grokking.plot_grokking_curve(log, 'grokking_curve.png')
+print('replotted')
+"
+
+OUT
+replotted
+Read C:\Users\NickMilleson\Documents\CSP\CST 627\Week 1\csp-cst627-week1\grokking_curve.png
+Clean now. Final result: grokking.py / grokking.ipynb log epoch, train_accuracy, test_accuracy, train_loss, weight_norm to grokking_results.csv, and the plot (grokking_curve.png) shades the memorization→generalization lag (epoch ~800 to ~12,750) across both panels.
+
+What it shows: train accuracy saturates fast (~epoch 800), test accuracy stays near zero through most of the shaded lag then rockets up starting around epoch 2,000–3,000. In the weight-norm panel, the norm grows steeply right up to the start of the lag, then its growth rate visibly flattens for the remainder of the lag — it keeps inching upward rather than shrinking, but the aggressive growth phase is clearly over exactly where the lag begins, and it doesn't resume until generalization is essentially complete. That's the honest finding here, not the "norm decreases" story sometimes quoted from the literature — worth calling out explicitly if this goes into the assignment writeup, since it's a real, defensible observation rather than the textbook version.
