@@ -13,9 +13,13 @@ grokking signature: training accuracy saturates to ~100% almost immediately
 while test accuracy lags near chance for a long stretch, then rises sharply
 to ~100% much later in training.
 
-Logs train/test accuracy at fixed epoch intervals to a CSV and plots the
-grokking curve (accuracy vs. epoch, log-x) to a PNG. Runs on GPU if
-available -- intended to be run from grokking.ipynb on Colab, or directly
+Logs train/test accuracy AND the model's total weight L2 norm at fixed epoch
+intervals to a CSV, and plots two stacked panels (accuracy, and weight norm)
+vs. epoch on a shared log-x axis to a PNG -- with the lag between memorization
+(train accuracy hits 100%) and generalization (test accuracy grokks) shaded,
+so you can see the weights continuing to change (shrinking, under weight
+decay) during that lag before the network suddenly generalizes. Runs on GPU
+if available -- intended to be run from grokking.ipynb on Colab, or directly
 via `python grokking.py`.
 """
 
@@ -81,6 +85,13 @@ def accuracy(logits, y):
     return (logits.argmax(dim=1) == y).float().mean().item()
 
 
+def weight_norm(model):
+    """L2 norm across every parameter, flattened -- the standard grokking-paper
+    diagnostic for watching weight decay shrink the solution during the lag
+    between memorization and generalization."""
+    return torch.sqrt(sum(p.pow(2).sum() for p in model.parameters())).item()
+
+
 def run_grokking(out_csv="grokking_results.csv", out_png="grokking_curve.png"):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}")
@@ -93,7 +104,7 @@ def run_grokking(out_csv="grokking_results.csv", out_png="grokking_curve.png"):
     opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     loss_fn = nn.CrossEntropyLoss()
 
-    log = []  # (epoch, train_acc, test_acc, train_loss)
+    log = []  # (epoch, train_acc, test_acc, train_loss, weight_norm)
     grok_checks_remaining = None
 
     for epoch in range(1, MAX_EPOCHS + 1):
@@ -109,9 +120,11 @@ def run_grokking(out_csv="grokking_results.csv", out_png="grokking_curve.png"):
             with torch.no_grad():
                 train_acc = accuracy(logits, y_train)
                 test_acc = accuracy(model(X_test), y_test)
-            log.append((epoch, train_acc, test_acc, loss.item()))
+                w_norm = weight_norm(model)
+            log.append((epoch, train_acc, test_acc, loss.item(), w_norm))
             print(f"epoch={epoch:7d} loss={loss.item():.5f} "
-                  f"train_acc={train_acc:.4f} test_acc={test_acc:.4f}")
+                  f"train_acc={train_acc:.4f} test_acc={test_acc:.4f} "
+                  f"weight_norm={w_norm:.3f}")
 
             if test_acc >= GROK_THRESHOLD:
                 if grok_checks_remaining is None:
@@ -122,23 +135,49 @@ def run_grokking(out_csv="grokking_results.csv", out_png="grokking_curve.png"):
 
     with open(out_csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "train_accuracy", "test_accuracy", "train_loss"])
+        writer.writerow(["epoch", "train_accuracy", "test_accuracy", "train_loss", "weight_norm"])
         writer.writerows(log)
 
-    epochs, train_accs, test_accs, _ = zip(*log)
-    plt.figure(figsize=(7, 5))
-    plt.plot(epochs, train_accs, label="train accuracy")
-    plt.plot(epochs, test_accs, label="test accuracy")
-    plt.xscale("log")
-    plt.xlabel("epoch (log scale)")
-    plt.ylabel("accuracy")
-    plt.title(f"Grokking: modular addition mod {P}")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=150)
+    plot_grokking_curve(log, out_png)
     print(f"Saved {out_csv} and {out_png}")
 
     return log
+
+
+def plot_grokking_curve(log, out_png):
+    epochs, train_accs, test_accs, _, weight_norms = zip(*log)
+
+    # lag window: first epoch training memorized the data, to the first epoch
+    # test accuracy hit the grokking threshold (its de facto maximum)
+    memorize_epoch = next((e for e, a in zip(epochs, train_accs) if a >= 0.999), None)
+    grok_epoch = next((e for e, a in zip(epochs, test_accs) if a >= GROK_THRESHOLD), None)
+
+    fig, (ax_acc, ax_norm) = plt.subplots(
+        2, 1, figsize=(7, 7), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
+    )
+
+    ax_acc.plot(epochs, train_accs, color="#0072B2", label="train accuracy")
+    ax_acc.plot(epochs, test_accs, color="#E69F00", label="test accuracy")
+    ax_acc.set_ylabel("accuracy")
+    ax_acc.set_title(f"Grokking: modular addition mod {P}")
+    ax_acc.legend(loc="upper left")
+
+    ax_norm.plot(epochs, weight_norms, color="#555555", label="weight L2 norm")
+    ax_norm.set_ylabel("weight norm")
+    ax_norm.set_xlabel("epoch (log scale)")
+    ax_norm.legend(loc="upper right")
+
+    if memorize_epoch is not None and grok_epoch is not None and grok_epoch > memorize_epoch:
+        for ax in (ax_acc, ax_norm):
+            ax.axvspan(memorize_epoch, grok_epoch, color="#555555", alpha=0.08, zorder=0)
+        ax_acc.axvline(memorize_epoch, color="#555555", linestyle="--", linewidth=1)
+        ax_acc.axvline(grok_epoch, color="#555555", linestyle="--", linewidth=1)
+        ax_acc.annotate("lag", xy=((memorize_epoch * grok_epoch) ** 0.5, 0.5),
+                         ha="center", color="#555555")
+
+    ax_norm.set_xscale("log")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150)
 
 
 if __name__ == "__main__":
