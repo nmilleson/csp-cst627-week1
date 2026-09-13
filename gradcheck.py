@@ -9,6 +9,7 @@ instead of a mysteriously rising validation loss.
 Architecture: Linear(D->H) -> ReLU -> Linear(H->1) -> Sigmoid -> BCE loss.
 """
 
+import csv
 import torch
 
 torch.manual_seed(0)
@@ -109,7 +110,7 @@ def relative_error(a, b, eps_floor=REL_ERROR_EPS_FLOOR):
     return (a - b).abs() / torch.clamp(torch.max(a.abs(), b.abs()), min=eps_floor)
 
 
-def run_gradcheck(n=4, d=6, h=4):
+def run_gradcheck(n=4, d=6, h=4, out_csv="gradcheck_results.csv"):
     params = init_params(d, h)
     X, y = make_batch(n, d)
 
@@ -157,6 +158,27 @@ def run_gradcheck(n=4, d=6, h=4):
         print(f"{name:6} {analytic_vs_ag:24.3e} {max_rel:30.3e} {mean_rel:30.3e} {status:>8}")
 
     print(f"\nOverall: {overall_status}")
+
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "param",
+            "analytic_vs_autograd_max_abs",
+            "fd_vs_autograd_max_rel_error",
+            "fd_vs_autograd_mean_rel_error",
+            "status",
+        ])
+        for name in ["W1", "b1", "W2", "b2"]:
+            r = results[name]
+            writer.writerow([
+                name,
+                r["analytic_vs_autograd_max_abs"],
+                r["fd_vs_autograd_max_rel"],
+                r["fd_vs_autograd_mean_rel"],
+                r["status"],
+            ])
+    print(f"Saved {out_csv}")
+
     return results, overall_status
 
 
